@@ -86,30 +86,6 @@ namespace AndroidBackupHelper
                     },
                     errs => 1);
 
-
-            //var tarStream = GetTarInputStream(File.OpenRead("test.ab"));
-
-            //TarEntry tarEntry;
-            //while ((tarEntry = tarStream.GetNextEntry()) != null) {
-            //    var entryStr = "";
-            //    if (tarEntry.IsDirectory)
-            //        entryStr += "[D]";
-
-            //    entryStr += $"{tarEntry.Name} size: {tarEntry.Size:n0}";
-
-            //    Console.WriteLine(entryStr);
-            //}
-
-            //var outAB = File.OpenWrite("testout.ab");
-            //outputAndroidBackupHeader(outAB);
-            //var defOut = new DeflaterOutputStream(outAB);
-            //TarOutputStream tarOutputStream = new TarOutputStream(defOut);
-
-            //AddAppsToTar(tarOutputStream, "apps");
-
-            //// Closing the archive also closes the underlying stream.
-            //// If you don't want this (e.g. writing to memorystream), set tarOutputStream.IsStreamOwner = false
-            //tarOutputStream.Close();
         }
 
         /// </summary>
