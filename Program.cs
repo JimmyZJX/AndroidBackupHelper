@@ -4,6 +4,7 @@ using ICSharpCode.SharpZipLib.Tar;
 using ICSharpCode.SharpZipLib.Zip.Compression.Streams;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -27,7 +28,7 @@ namespace AndroidBackupHelper
         public string file { get; set; }
     }
 
-    [Verb("pack", HelpText = "pack a backup \"apps\" dir.")]
+    [Verb("pack", HelpText = "pack a backup \"apps\" dir. Requires bsdtar.exe for a compatible format!")]
     public class PackOptions
     {
         [Value(0, Required = true)]
@@ -73,12 +74,26 @@ namespace AndroidBackupHelper
                         return 0;
                     },
                     (PackOptions opts) => {
+
+                        var tar0 = $"{opts.file}_.tar"; var tar1 = $"{opts.file}.tar";
+                        using (var tarOutputStream = new TarOutputStream(File.Create(tar0))) {
+                            AddAppsToTar(tarOutputStream, opts.apps_dir);
+                        }
+
+                        // Console.WriteLine("[+] Executing: bsdtar.exe " + $"-cf {tar1} @{tar0}");
+                        var proc = Process.Start("bsdtar.exe", $"-cf {tar1} @{tar0}");
+                        proc.WaitForExit();
+                        if (proc.ExitCode != 0) {
+                            Console.WriteLine($"'bsdtar -cf {tar1} @{tar0}' failed with code {proc.ExitCode}");
+                            return 1;
+                        }
+
                         using (var outAB = File.OpenWrite(opts.file)) {
                             outputAndroidBackupHeader(outAB);
 
-                            using (var defOut = new DeflaterOutputStream(outAB))
-                            using (var tarOutputStream = new TarOutputStream(defOut)) {
-                                AddAppsToTar(tarOutputStream, opts.apps_dir);
+                            using (var fTar0 = File.OpenRead(tar1))
+                            using (var defOut = new DeflaterOutputStream(outAB)) {
+                                fTar0.CopyTo(defOut);
                             }
                         }
 
