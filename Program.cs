@@ -5,9 +5,15 @@ using ICSharpCode.SharpZipLib.Zip.Compression.Streams;
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.IO;
 using System.Linq;
 using System.Text;
+
+using System.IO;
+
+using File = Alphaleonis.Win32.Filesystem.File;
+using Directory = Alphaleonis.Win32.Filesystem.Directory;
+using Path = Alphaleonis.Win32.Filesystem.Path;
+using ICSharpCode.SharpZipLib.Zip.Compression;
 
 namespace AndroidBackupHelper
 {
@@ -36,6 +42,9 @@ namespace AndroidBackupHelper
 
         [Value(1, Required = true)]
         public string file { get; set; }
+
+        [Option('C', Required = false, HelpText = "Disable Android backup conventions")]
+        public bool disableConventions { get; set; }
 
         [Usage(ApplicationAlias = "AndroidBackupHelper")]
         public static IEnumerable<Example> Examples =>
@@ -77,14 +86,14 @@ namespace AndroidBackupHelper
 
                         var tar0 = $"{opts.file}_.tar"; var tar1 = $"{opts.file}.tar";
                         using (var tarOutputStream = new TarOutputStream(File.Create(tar0))) {
-                            AddAppsToTar(tarOutputStream, opts.apps_dir);
+                            AddAppsToTar(tarOutputStream, opts.apps_dir, !opts.disableConventions);
                         }
 
                         // Console.WriteLine("[+] Executing: bsdtar.exe " + $"-cf {tar1} @{tar0}");
-                        var proc = Process.Start("bsdtar.exe", $"-cf {tar1} @{tar0}");
+                        var proc = Process.Start("bsdtar.exe", $"--format ustar -cf {tar1} @{tar0}");
                         proc.WaitForExit();
                         if (proc.ExitCode != 0) {
-                            Console.WriteLine($"'bsdtar -cf {tar1} @{tar0}' failed with code {proc.ExitCode}");
+                            Console.WriteLine($"'bsdtar --format ustar -cf {tar1} @{tar0}' failed with code {proc.ExitCode}");
                             return 1;
                         }
 
@@ -92,7 +101,8 @@ namespace AndroidBackupHelper
                             outputAndroidBackupHeader(outAB);
 
                             using (var fTar0 = File.OpenRead(tar1))
-                            using (var defOut = new DeflaterOutputStream(outAB)) {
+                            using (var defOut = new DeflaterOutputStream(outAB, new Deflater(Deflater.BEST_SPEED))) {
+                                // BEST_SPEED supresses restore errors magically!!
                                 fTar0.CopyTo(defOut);
                             }
                         }
@@ -110,15 +120,13 @@ namespace AndroidBackupHelper
         public static void ExtractTarByEntry(TarInputStream tarIn, string targetDir) {
             TarEntry tarEntry;
             while ((tarEntry = tarIn.GetNextEntry()) != null) {
-                if (tarEntry.IsDirectory)
-                    continue;
 
                 // Converts the unix forward slashes in the filenames to windows backslashes
                 string name = tarEntry.Name.Replace('/', Path.DirectorySeparatorChar);
 
                 // Remove any root e.g. '\' because a PathRooted filename defeats Path.Combine
                 if (Path.IsPathRooted(name))
-                    name = name.Substring(Path.GetPathRoot(name).Length);
+                    name = name.Substring(System.IO.Path.GetPathRoot(name).Length);
 
                 // Apply further name transformations here as necessary
                 string outName = Path.Combine(targetDir, name);
@@ -126,11 +134,16 @@ namespace AndroidBackupHelper
                 string directoryName = Path.GetDirectoryName(outName);
 
                 try {
+                    if (tarEntry.IsDirectory) {
+                        Directory.CreateDirectory(outName);
+                        continue;
+                    }
+
                     // Does nothing if directory exists
                     Directory.CreateDirectory(directoryName);
 
                     try {
-                        using (var outStr = new FileStream(outName, FileMode.Create)) {
+                        using (var outStr = File.Open(outName, FileMode.Create)) {
                             tarIn.CopyEntryContents(outStr);
                         }
 
@@ -139,6 +152,8 @@ namespace AndroidBackupHelper
                         File.SetLastWriteTime(outName, myDt);
                     } catch (NotSupportedException) {
                         Console.WriteLine($"[!] invalid file name: {outName}");
+                    } catch (PathTooLongException) {
+                        Console.WriteLine($"[!] file name too long?! {outName}");
                     }
                 } catch (NotSupportedException) {
                     Console.WriteLine($"[!] invalid directory name: {directoryName}");
@@ -156,7 +171,19 @@ namespace AndroidBackupHelper
             return $"{path1.Trim('/', '\\')}/{path2.Trim('/', '\\')}";
         }
 
-        static void AddAppsToTar(TarOutputStream tarOutputStream, string apps_directory) {
+        public static Dictionary<string, string> AndroidBackupConventions = new Dictionary<string, string> {
+            { "databases", "db" },
+            { "files", "f" },
+            { "shared_prefs", "sp" },
+            { "cache", "c" },
+            { "__sdcard_files__", "ef" },
+            { "__apk__", "a" },
+            { "__obb__", "obb" },
+            { "__wildcard__", "r" },
+        };
+        public static string AndroidBackupWildcardDir = "r";
+
+        static void AddAppsToTar(TarOutputStream tarOutputStream, string apps_directory, bool conventions) {
 
             string[] directories = Directory.GetDirectories(apps_directory);
 
@@ -172,6 +199,19 @@ namespace AndroidBackupHelper
                 // write other files
                 foreach (var directory2 in Directory.GetDirectories(directory)) {
                     var dir2 = Path.GetFileName(directory2);
+
+                    if (conventions) {
+                        if (AndroidBackupConventions.TryGetValue(dir2, out var dir2Real)) {
+                            Console.WriteLine("[+]    {dir2} -> {dir2Real}");
+                            dir2 = dir2Real;
+                        } else if (AndroidBackupConventions.ContainsValue(dir2)) {
+                            // name accepted
+                        } else {
+                            dir2Real = $"{AndroidBackupWildcardDir}/{dir2}";
+                            Console.WriteLine("[!]    {dir2} -> {dir2Real}");
+                            dir2 = dir2Real;
+                        }
+                    }
 
                     Console.WriteLine($"[+]    - {dir2}");
                     AddDirToTar(tarOutputStream, directory2, $"apps/{app}/{dir2}", false);
