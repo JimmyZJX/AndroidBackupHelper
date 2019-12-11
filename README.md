@@ -1,6 +1,8 @@
 # AndroidBackupHelper
 
-AndroidBackupHelper 1.0.0.0
+key feature: pack a backup "apps" dir with proper format (generate a valid backup.ab)
+
+also: show *.ab contents or unpack it to a folder
 
 -  unpack:     Unpack an android backup file (*.ab).
 
