@@ -14,29 +14,30 @@ using File = Alphaleonis.Win32.Filesystem.File;
 using Directory = Alphaleonis.Win32.Filesystem.Directory;
 using Path = Alphaleonis.Win32.Filesystem.Path;
 using ICSharpCode.SharpZipLib.Zip.Compression;
+using System.IO.Compression;
+using ICSharpCode.SharpZipLib.Checksum;
 
-namespace AndroidBackupHelper
-{
+namespace AndroidBackupHelper {
     [Verb("unpack", HelpText = "Unpack an android backup file (*.ab).")]
-    public class UnpackOptions
-    {
+    public class UnpackOptions {
         [Value(0, Required = true)]
         public string file { get; set; }
 
         [Value(1, Required = false, Default = "")]
         public string directory { get; set; }
+
+        [Option('t', "tar", Required = false, HelpText = "Extract tar only")]
+        public bool extractTarOnly { get; set; }
     }
 
     [Verb("show", HelpText = "List content of an android backup file (*.ab).")]
-    public class ShowOptions
-    {
+    public class ShowOptions {
         [Value(0, Required = true)]
         public string file { get; set; }
     }
 
-    [Verb("pack", HelpText = "pack a backup \"apps\" dir. Requires bsdtar.exe for a compatible format!")]
-    public class PackOptions
-    {
+    [Verb("pack", HelpText = "pack a backup \"apps\" dir.")]
+    public class PackOptions {
         [Value(0, Required = true)]
         public string apps_dir { get; set; }
 
@@ -53,17 +54,25 @@ namespace AndroidBackupHelper
             };
     }
 
-    class Program
-    {
+    class Program {
         static int Main(string[] args) {
 
             return Parser.Default.ParseArguments<UnpackOptions, ShowOptions, PackOptions>(args)
                 .MapResult(
                     (UnpackOptions opts) => {
-                        using (var tarStream = GetTarInputStream(File.OpenRead(opts.file))) {
-                            ExtractTarByEntry(tarStream, opts.directory);
+
+                        if (opts.extractTarOnly) {
+                            using (var inflater = GetTarInflaterInputStream(File.OpenRead(opts.file))) {
+                                using (var tar = File.Create(Path.Combine(opts.directory, "backup.abh.tar"))) {
+                                    inflater.CopyTo(tar);
+                                }
+                            }
+                        } else {
+                            using (var tarStream = GetTarInputStream(File.OpenRead(opts.file))) {
+                                ExtractTarByEntry(tarStream, opts.directory);
+                            }
+                            // tarArchive.ExtractContents(opts.directory);
                         }
-                        // tarArchive.ExtractContents(opts.directory);
 
                         return 0;
                     },
@@ -84,27 +93,37 @@ namespace AndroidBackupHelper
                     },
                     (PackOptions opts) => {
 
-                        var tar0 = $"{opts.file}_.tar"; var tar1 = $"{opts.file}.tar";
-                        using (var tarOutputStream = new TarOutputStream(File.Create(tar0))) {
-                            AddAppsToTar(tarOutputStream, opts.apps_dir, !opts.disableConventions);
-                        }
-
-                        // Console.WriteLine("[+] Executing: bsdtar.exe " + $"-cf {tar1} @{tar0}");
-                        var proc = Process.Start("bsdtar.exe", $"--format ustar -cf {tar1} @{tar0}");
-                        proc.WaitForExit();
-                        if (proc.ExitCode != 0) {
-                            Console.WriteLine($"'bsdtar --format ustar -cf {tar1} @{tar0}' failed with code {proc.ExitCode}");
-                            return 1;
+                        var tarname = $"{opts.file}.tar";
+                        using (var tar = File.Create(tarname)) {
+                            AddAppsToTar(tar, opts.apps_dir, !opts.disableConventions);
                         }
 
                         using (var outAB = File.OpenWrite(opts.file)) {
                             outputAndroidBackupHeader(outAB);
 
-                            using (var fTar0 = File.OpenRead(tar1))
-                            using (var defOut = new DeflaterOutputStream(outAB, new Deflater(Deflater.BEST_SPEED))) {
-                                // BEST_SPEED supresses restore errors magically!!
-                                fTar0.CopyTo(defOut);
+                            outAB.WriteByte(0x78);
+                            outAB.WriteByte(0xDA);
+
+                            var chksum = new Adler32();
+
+                            using (var fTar = File.OpenRead(tarname)) {
+
+                                using (var br = new BinaryReader(fTar, Encoding.UTF8, true)) {
+                                    var BUFLEN = 4096;
+                                    while (true) {
+                                        var buf = br.ReadBytes(BUFLEN);
+                                        if (buf.Length <= 0) break;
+                                        chksum.Update(buf);
+                                    }
+                                }
+
+                                fTar.Seek(0, SeekOrigin.Begin);
+                                using (var defOut = new DeflateStream(outAB, CompressionMode.Compress, true)) {
+                                    fTar.CopyTo(defOut);
+                                }
                             }
+
+                            outAB.Write(BitConverter.GetBytes((uint)chksum.Value), 0, 4);
                         }
 
                         return 0;
@@ -172,8 +191,8 @@ namespace AndroidBackupHelper
         }
 
         public static Dictionary<string, string> AndroidBackupConventions = new Dictionary<string, string> {
-            { "databases", "db" },
             { "files", "f" },
+            { "databases", "db" },
             { "shared_prefs", "sp" },
             { "cache", "c" },
             { "__sdcard_files__", "ef" },
@@ -183,7 +202,7 @@ namespace AndroidBackupHelper
         };
         public static string AndroidBackupWildcardDir = "r";
 
-        static void AddAppsToTar(TarOutputStream tarOutputStream, string apps_directory, bool conventions) {
+        static void AddAppsToTar(Stream tar, string apps_directory, bool conventions) {
 
             string[] directories = Directory.GetDirectories(apps_directory);
 
@@ -192,65 +211,82 @@ namespace AndroidBackupHelper
                 Console.WriteLine($"[+] App: {app}");
 
                 // manifest comes first
-                using (var fin_manifest = File.OpenRead(Path.Combine(directory, "_manifest"))) {
-                    AddFileToTarRaw(tarOutputStream, fin_manifest, $"apps/{app}/_manifest");
+                var fManifest = Path.Combine(directory, "_manifest");
+                using (var fin_manifest = File.OpenRead(fManifest)) {
+                    // AddFileToTarRaw(tarOutputStream, fin_manifest, new FileInfo(fManifest), $"apps/{app}/_manifest");
+                    ABTar.WriteTarFile(app, "", "_manifest", fin_manifest, tar, out var _);
                 }
 
                 // write other files
                 foreach (var directory2 in Directory.GetDirectories(directory)) {
-                    var dir2 = Path.GetFileName(directory2);
+                    var domain = Path.GetFileName(directory2);
 
                     if (conventions) {
-                        if (AndroidBackupConventions.TryGetValue(dir2, out var dir2Real)) {
+                        if (AndroidBackupConventions.TryGetValue(domain, out var dir2Real)) {
                             Console.WriteLine("[+]    {dir2} -> {dir2Real}");
-                            dir2 = dir2Real;
-                        } else if (AndroidBackupConventions.ContainsValue(dir2)) {
+                            domain = dir2Real;
+                        } else if (AndroidBackupConventions.ContainsValue(domain)) {
                             // name accepted
                         } else {
-                            dir2Real = $"{AndroidBackupWildcardDir}/{dir2}";
+                            dir2Real = $"{AndroidBackupWildcardDir}/{domain}";
                             Console.WriteLine("[!]    {dir2} -> {dir2Real}");
-                            dir2 = dir2Real;
+                            domain = dir2Real;
                         }
                     }
 
-                    Console.WriteLine($"[+]    - {dir2}");
-                    AddDirToTar(tarOutputStream, directory2, $"apps/{app}/{dir2}", false);
+                    Console.WriteLine($"[+]    - {domain}");
+                    AddDirToTar(tar, directory2, app, domain, "", false);
                 }
             }
+
+            ABTar.FinishTar(tar);
         }
 
-        static void AddDirToTar(TarOutputStream tarOutputStream, string sourceDirectory, string basePath, bool writeDirEntry = true) {
+        static void AddDirToTar(Stream tar, string sourceDirectory, string app, string domain, string basePath, bool writeDirEntry = true) {
             // Optionally, write an entry for the directory itself.
             if (writeDirEntry) {
                 TarEntry tarEntry = TarEntry.CreateEntryFromFile(sourceDirectory);
                 tarEntry.Name = basePath;
-                tarOutputStream.PutNextEntry(tarEntry);
+                // tarOutputStream.PutNextEntry(tarEntry);
+                ABTar.WriteTarFile(app, domain, basePath, null, tar, out var _);
             }
 
             // Write each file to the tar.
             string[] filenames = Directory.GetFiles(sourceDirectory);
 
             foreach (string filename in filenames) {
-                using (Stream inputStream = File.OpenRead(filename)) {
-                    AddFileToTarRaw(tarOutputStream, inputStream,
-                        PathCombineUnixUnsafe(basePath, Path.GetFileName(filename)));
+                using (FileStream file = File.OpenRead(filename)) {
+                    //AddFileToTarRaw(tarOutputStream, inputStream, new FileInfo(filename),
+                    //    PathCombineUnixUnsafe(basePath, Path.GetFileName(filename)));
+                    ABTar.WriteTarFile(app, domain,
+                        PathCombineUnixUnsafe(basePath, Path.GetFileName(filename)),
+                        file, tar, out var _);
                 }
             }
 
             // Recurse.
             string[] directories = Directory.GetDirectories(sourceDirectory);
-            foreach (string directory in directories)
-                AddDirToTar(tarOutputStream, directory,
-                    PathCombineUnixUnsafe(basePath, Path.GetFileName(directory)));
+            foreach (string directory in directories) {
+                //AddDirToTar(tarOutputStream, directory,
+                //    PathCombineUnixUnsafe(basePath, Path.GetFileName(directory)));
+                ABTar.WriteTarFile(app, domain,
+                    PathCombineUnixUnsafe(basePath, Path.GetFileName(directory)),
+                    null, tar, out var _);
+            }
         }
 
-        static void AddFileToTarRaw(TarOutputStream tarOutputStream, Stream fin, string name) {
+        static void _AddFileToTarRaw(TarOutputStream tarOutputStream, FileStream fin, FileInfo info, string name) {
 
             long fileSize = fin.Length;
 
             // Create a tar entry named as appropriate. You can set the name to anything,
             // but avoid names starting with drive or UNC.
             TarEntry entry = TarEntry.CreateTarEntry(name);
+
+            if (info.IsReadOnly) {
+                entry.TarHeader.Mode &= Convert.ToInt32("0444", 8);
+                Console.WriteLine($"chmod [{name}] -> 0{Convert.ToString(entry.TarHeader.Mode, 8)}");
+            }
 
             // Must set size, otherwise TarOutputStream will fail when output exceeds.
             entry.Size = fileSize;
@@ -271,10 +307,13 @@ namespace AndroidBackupHelper
             tarOutputStream.CloseEntry();
         }
 
-        public static TarInputStream GetTarInputStream(Stream fin) {
+        public static InflaterInputStream GetTarInflaterInputStream(Stream fin) {
             skipAndroidBackupHeader(fin);
+            return new InflaterInputStream(fin);
+        }
 
-            InflaterInputStream inflater = new InflaterInputStream(fin);
+        public static TarInputStream GetTarInputStream(Stream fin) {
+            var inflater = GetTarInflaterInputStream(fin);
             return new TarInputStream(inflater);
         }
 
