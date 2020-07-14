@@ -1,6 +1,10 @@
 # AndroidBackupHelper
 
-key feature: pack a backup "apps" dir with proper format (generate a valid backup.ab)
+key feature: pack an Android backup "apps" dir with proper format (i.e. generate a valid backup.ab)
+
+Implement the tar format same as Android backup service (line by line translate from C++ to C#, latest version of Android 6), and test against multiple backups.
+
+Currently password is not supported.
 
 also: show *.ab contents or unpack it to a folder
 
